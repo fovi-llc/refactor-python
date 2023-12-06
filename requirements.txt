@@ -1,4 +1,4 @@
-aider
+aider-chat
 intervaltree
 rope
 llama-index
