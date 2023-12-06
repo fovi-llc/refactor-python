@@ -1,0 +1,7 @@
+aider
+intervaltree
+rope
+llama-index
+httpx
+httpcore
+three-merge

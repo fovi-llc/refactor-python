@@ -1,0 +1,5 @@
+.aider*
+.git
+.venv
+aider
+statement.py
