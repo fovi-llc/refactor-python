@@ -1,5 +1,5 @@
 #!python
-# %pip install -qU aider intervaltree rope llama-index httpx httpcore three-merge
+# %pip install -qU aider-chat intervaltree rope llama-index diff-match-patch httpx httpcore
 
 import os
 from pathlib import Path
