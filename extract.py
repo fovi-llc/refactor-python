@@ -29,7 +29,7 @@ from llama_index.tools.utils import create_schema_from_function
 
 from textwrap import wrap
 
-import rope.base.project
+from rope.base.project import Project
 from rope.refactor.extract import ExtractVariable, ExtractMethod
 from rope.base.codeanalyze import SourceLinesAdapter
 from rope.base.exceptions import RopeError
@@ -40,6 +40,47 @@ from three_merge import merge
 import argparse
 
 
+def add_function_bodies(node: ts.Node, body_lines: it.IntervalTree):
+    if node is None:
+        return
+    if 'function_definition' in node.type:
+        for body in node.children_by_field_name('body'):
+            start_line = body.start_point[0]
+            limit_line = body.end_point[0]+1
+            body_lines.addi(start_line, limit_line)
+    for child in node.children:
+        add_function_bodies(child, body_lines)
+    return
+
+
+def add_function_definitions(node: ts.Node, definition_lines: it.IntervalTree):
+    if node is None:
+        return
+    if 'function_definition' in node.type:
+        for child in node.children:
+            if child.type == 'body':
+                break
+            start_line = child.start_point[0]
+            limit_line = child.end_point[0]+1
+            definition_lines.addi(start_line, limit_line)
+            if child.type == ':':
+                break
+    for child in node.children:
+        add_function_definitions(child, definition_lines)
+    return
+
+
+def enumerate_extract_begin_lines(node: ts.Node) -> it.IntervalTree:
+    extract_begin_lines = it.IntervalTree()
+    add_function_bodies(node, extract_begin_lines)
+    extract_begin_lines.merge_overlaps()
+    definition_lines = it.IntervalTree()
+    add_function_definitions(node, definition_lines)
+    extract_begin_lines.difference_update(definition_lines)
+    return extract_begin_lines
+    
+
+
 Ref = namedtuple("Ref", ['tag', 'name', 'line', 'node'])
 
 @dataclass()
@@ -47,7 +88,6 @@ class CodeIntervalInfo:
     node: ts.Node
     token_count: int
 
-# @dataclass(kw_only=True)
 @dataclass()
 class CodeTreeInfo:
     rm: RepoMap
@@ -70,6 +110,7 @@ class CodeTreeInfo:
             self.load(force=True)
 
     def load(self, force=False):
+        global code_info_project, code_info_resource, rope_lines
         current_mtime = self.rm.get_mtime(self.fname)
         if current_mtime is None:
             raise ValueError(f"File {self.fname} not found")
@@ -87,7 +128,11 @@ class CodeTreeInfo:
         self.tree = parser.parse(bytes(code, "utf-8"))
         self.add_definitions_to_map(self.tree.root_node)
         self.file_mtime = current_mtime
-        self.valid_begin_lines = self.enumerate_extract_begin_lines()
+        code_info_project = Project(self.rm.root)
+        code_info_resource = code_info_project.get_resource(self.fname)
+        rope_lines = SourceLinesAdapter(code_info_resource.read())
+
+        self.valid_begin_lines = enumerate_extract_begin_lines(self.tree.root_node)
 
     def add_definitions_to_map(self, node: ts.Node):
         if node is None:
@@ -126,15 +171,6 @@ class CodeTreeInfo:
 
             yield Ref(tag=tag, name=node.text.decode("utf-8"), line=node.start_point[0], node=node)
     
-    def enumerate_extract_begin_lines(self) -> it.IntervalTree:
-        extract_begin_lines = it.IntervalTree()
-        add_function_bodies(self.tree.root_node, extract_begin_lines)
-        extract_begin_lines.merge_overlaps()
-        definition_lines = it.IntervalTree()
-        add_function_definitions(self.tree.root_node, definition_lines)
-        extract_begin_lines.difference_update(definition_lines)
-        return extract_begin_lines
-    
     def numbered_lines(self, start_line: int = 0, limit_line: int = None):
         if limit_line is None:
             limit_line = len(self.lines)
@@ -145,6 +181,28 @@ class CodeTreeInfo:
             limit_line = len(self.lines)
         return '\n'.join([(f'{i:04d}:{line}' if numbered_lines.overlaps(i) else f'----:{line}') for i, line in enumerate(self.lines[start_line:limit_line], start_line)])
 
+
+def code_info_init(root: str, fname: str):
+    global rm, code_info, code_info_changes_list
+    rm = RepoMap(root=root, io=InputOutput(), main_model=models.Model.create('gpt-4-1106-preview'))
+    code_info = CodeTreeInfo(rm=rm, fname=fname)
+    code_info_changes_list = []
+    return code_info
+
+
+def get_code_info_project() -> Project:
+    global code_info_project
+    return code_info_project
+
+
+def get_code_info_resource():
+    global code_info_resource
+    return code_info_resource
+
+
+def get_code_info_changes_list() -> list[Change]:
+    global code_info_changes_list
+    return code_info_changes_list
 
 
 def print_identifiers(node):
@@ -164,38 +222,6 @@ def print_node(node: ts.Node, indent: int = 0):
     print(f"{' '*indent}{node.type} {node.start_point}..{node.end_point}")
     for child in node.children:
         print_node(child, indent=indent + 2)
-
-
-def add_function_bodies(node: ts.Node, body_lines: it.IntervalTree):
-    if node is None:
-        return
-    if 'function_definition' in node.type:
-        for body in node.children_by_field_name('body'):
-            start_line = body.start_point[0]
-            limit_line = body.end_point[0]+1
-            body_lines.addi(start_line, limit_line)
-    for child in node.children:
-        add_function_bodies(child, body_lines)
-    return
-
-
-def add_function_definitions(node: ts.Node, definition_lines: it.IntervalTree):
-    if node is None:
-        return
-    if 'function_definition' in node.type:
-        for child in node.children:
-            if child.type == 'body':
-                break
-            start_line = child.start_point[0]
-            limit_line = child.end_point[0]+1
-            definition_lines.addi(start_line, limit_line)
-            if child.type == ':':
-                break
-    for child in node.children:
-        add_function_definitions(child, definition_lines)
-    return
-
-
 
 
 def extract_method_problems(code_info: CodeTreeInfo, fname: str, begin_line: int, end_line: int):
@@ -423,12 +449,8 @@ def main(cli_args):
         print(f"The directory {repo_dir} does not exist.")
         exit(1)
 
-    rm = RepoMap(root=repo_dir, io=InputOutput(), main_model=models.Model.create('gpt-4-1106-preview'))
-    code_info = CodeTreeInfo(rm=rm, fname=fname)
-    code_info_project = rope.base.project.Project(code_info.rm.root)
-    code_info_resource = code_info_project.get_resource(code_info.fname)
-    rope_lines = SourceLinesAdapter(code_info_resource.read())
-    code_info_changes_list = []
+    code_info_init(root=repo_dir, fname=fname)
+    
     run_agent(swe_instructions, streaming=not args.no_streaming)
 
     if code_info_changes_list:
