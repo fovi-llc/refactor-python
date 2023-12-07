@@ -35,7 +35,7 @@ from rope.base.codeanalyze import SourceLinesAdapter
 from rope.base.exceptions import RopeError
 from rope.base.change import Change, ChangeSet, ChangeContents
 
-from three_merge import merge
+from diff_match_patch import diff_match_patch
 
 import argparse
 
@@ -397,23 +397,62 @@ def run_agent(swe_instructions, streaming: bool = True):
     return code_info_changes_list
 
 
+def merge(v0: str, a: str, b: str) -> str:
+    # BillCompton
+    # Mar 29, 2011, 2:26:47 AM
+    # to Diff Match Patch
+    # I need a three-way merge. That is, given three versions of a doc, V0,
+    # V1, and V2, where V1 and V2 are changes from V0, merge V1 and V2 into
+    # V3, including detecting and marking "conflicts" (sections changed by
+    # both V1 and V2).
+    #
+    # Does Google Diff Match Patch already provide this? If not, is Google
+    # Diff Match Patch a good starting-point for implementing this?
+    #
+    # Thanks in advance!
+    # Neil Fraser
+    # Mar 29, 2011, 11:14:09 AM
+    # to Diff Match Patch
+    # Yes, this is what DMP was originally built for. Here's the
+    # pseudocode:
+    #
+    # patches = patch_make(V0, V2)
+    # (V3, result) = patch_apply(patches, V1)
+    #
+    # The result list is an array of true/false values. If it's all true,
+    # then the merge worked great. If there's a false, then one of the
+    # patches could not be applied. In that case it might be worth swapping
+    # V1 and V2, trying again and seeing if the results are better.
+
+    dmp = diff_match_patch()
+    patches = dmp.patch_make(v0, a)
+    (v3, result) = dmp.patch_apply(patches, b)
+    if not all(result):
+        print("First try at merge failed.  Swapping V1 and V2 and trying again.")
+        patches = dmp.patch_make(v0, b)
+        (v3, result) = dmp.patch_apply(patches, a)
+        if not all(result):
+            print("*** MERGE FAILED!!! ***")
+    return v3
+
+
 def merge_change_list(resource, change_list: list[Change]) -> Change:
     source = resource.read()
     base = source
     for change in change_list:
         if isinstance(change, ChangeSet):
-            source = merge_changes(resource, change.changes, source, base)
+            source = merge_changes(resource, base, source, change.changes)
         elif isinstance(change, ChangeContents):
-            source = merge(change.new_contents, source, base)
+            source = merge(base, source, change.new_contents)
     return ChangeContents(resource, source)
 
 
-def merge_changes(resource, change_list: list[Change], source: str, base: str) -> str:
+def merge_changes(resource, base: str, source: str, change_list: list[Change]) -> str:
     for change in change_list:
         if isinstance(change, ChangeSet):
-            source = merge_changes(resource, change.changes, source, base)
+            source = merge_changes(resource, base, source, change.changes)
         elif isinstance(change, ChangeContents):
-            source = merge(change.new_contents, source, base)
+            source = merge(base, source, change.new_contents)
     return source
 
 
