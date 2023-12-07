@@ -22,7 +22,7 @@ def extract_method(file_path, begin_line, end_line, new_function_name):
     return changes
 
 
-def test_merge_two_changes_fail():
+def test_merge_two_changes_work():
     code_info_init(root=repo_dir, fname=fname)
     code_info_changes_list: list[Change] = []
 
@@ -57,5 +57,5 @@ def test_merge_two_changes_scope_mismatch():
 
 
 if __name__ == '__main__':
-    test_merge_two_changes_fail()
+    test_merge_two_changes_work()
     test_merge_two_changes_scope_mismatch()
