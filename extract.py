@@ -3,11 +3,12 @@
 
 import os
 from pathlib import Path
+import sys
 
 from aider.dump import dump
 from aider.io import InputOutput
 from aider import models
-from aider.repomap import RepoMap, Tag, find_src_files
+from aider.repomap import RepoMap
 
 import intervaltree as it
 import tree_sitter as ts
@@ -20,7 +21,6 @@ from dataclasses import dataclass
 
 from llama_index.tools import FunctionTool
 from llama_index.agent import OpenAIAssistantAgent
-from llama_index.callbacks import trace_method
 
 from llama_index.agent import OpenAIAgent
 from llama_index.llms import OpenAI
@@ -39,42 +39,6 @@ from three_merge import merge
 
 import argparse
 
-if 'OPENAI_API_KEY' not in os.environ:
-    print("Please set OPENAI_API_KEY environment variable")
-    exit(1)
-
-# Create the parser
-parser = argparse.ArgumentParser(description="Process some files.")
-
-# Add the arguments
-parser.add_argument('file', type=str, help='The file to refactor')
-parser.add_argument('--repo_dir', type=str, default=os.getcwd(), help='The directory to process (defaults to current directory)')
-parser.add_argument('--no_streaming', action='store_true', help='Disable streaming')
-parser.add_argument('--no_commit', action='store_true', help='Disable commit (i.e. update file)')
-parser.add_argument('--no_undo', action='store_true', help='Disable undo commit')
-
-# Parse the arguments
-args = parser.parse_args()
-
-streaming = not args.no_streaming
-do_commit = not args.no_commit
-undo_commit = not args.no_undo
-
-fname = args.file
-repo_dir = args.repo_dir
-
-# Check if the file exists
-if not os.path.isfile(fname):
-    print(f"The file {fname} does not exist.")
-    exit(1)
-
-# Check if the directory exists
-if not os.path.isdir(repo_dir):
-    print(f"The directory {repo_dir} does not exist.")
-    exit(1)
-
-
-rm = RepoMap(root=repo_dir, io=InputOutput(), main_model=models.Model.create('gpt-4-1106-preview'))
 
 Ref = namedtuple("Ref", ['tag', 'name', 'line', 'node'])
 
@@ -94,6 +58,7 @@ class CodeTreeInfo:
     tree: ts.Tree
     interval_tree_map: it.IntervalTree
     file_mtime: float | None = None
+    valid_begin_lines: it.IntervalTree = None
     encoding: str = "utf-8"
     number_separator: str = "|"
 
@@ -105,16 +70,16 @@ class CodeTreeInfo:
             self.load(force=True)
 
     def load(self, force=False):
-        current_mtime = self.rm.get_mtime(fname)
+        current_mtime = self.rm.get_mtime(self.fname)
         if current_mtime is None:
-            raise ValueError(f"File {fname} not found")
+            raise ValueError(f"File {self.fname} not found")
         if not force and self.file_mtime and (current_mtime < self.file_mtime):
             if self.rm.verbose:
-                self.rm.io.tool_output(f"File {fname} not modified")
+                self.rm.io.tool_output(f"File {self.fname} not modified")
             return
-        code = self.rm.io.read_text(fname)
+        code = self.rm.io.read_text(self.fname)
         if not code:
-            raise ValueError(f"File {fname} is empty")
+            raise ValueError(f"File {self.fname} is empty")
         self.lines = code.splitlines()
         self.token_counts = [self.rm.token_count(line) for line in self.lines]
         self.interval_tree_map = it.IntervalTree()
@@ -122,9 +87,7 @@ class CodeTreeInfo:
         self.tree = parser.parse(bytes(code, "utf-8"))
         self.add_definitions_to_map(self.tree.root_node)
         self.file_mtime = current_mtime
-
-    def numbered_lines(self, start_line: int, limit_line: int):
-        return '\n'.join([f'{i:04d}{self.number_separator}{line}' for i, line in enumerate(self.lines[start_line:limit_line], start_line)])
+        self.valid_begin_lines = self.enumerate_extract_begin_lines()
 
     def add_definitions_to_map(self, node: ts.Node):
         if node is None:
@@ -158,14 +121,30 @@ class CodeTreeInfo:
         captures = list(captures)
 
         for node, tag in captures:
-            if not 'name.reference' in tag:
+            if 'name.reference' not in tag:
                 continue
 
             yield Ref(tag=tag, name=node.text.decode("utf-8"), line=node.start_point[0], node=node)
+    
+    def enumerate_extract_begin_lines(self) -> it.IntervalTree:
+        extract_begin_lines = it.IntervalTree()
+        add_function_bodies(self.tree.root_node, extract_begin_lines)
+        extract_begin_lines.merge_overlaps()
+        definition_lines = it.IntervalTree()
+        add_function_definitions(self.tree.root_node, definition_lines)
+        extract_begin_lines.difference_update(definition_lines)
+        return extract_begin_lines
+    
+    def numbered_lines(self, start_line: int = 0, limit_line: int = None):
+        if limit_line is None:
+            limit_line = len(self.lines)
+        return '\n'.join([f'{i:04d}{self.number_separator}{line}' for i, line in enumerate(self.lines[start_line:limit_line], start_line)])
 
+    def numbered_lines(self, numbered_lines: it.IntervalTree, start_line: int = 0, limit_line: int = None) -> str:
+        if limit_line is None:
+            limit_line = len(self.lines)
+        return '\n'.join([(f'{i:04d}:{line}' if numbered_lines.overlaps(i) else f'----:{line}') for i, line in enumerate(self.lines[start_line:limit_line], start_line)])
 
-code_info = CodeTreeInfo(rm=rm, fname=fname)
-# dump(code_info)
 
 
 def print_identifiers(node):
@@ -217,27 +196,6 @@ def add_function_definitions(node: ts.Node, definition_lines: it.IntervalTree):
     return
 
 
-def enumerate_extract_begin_lines() -> it.IntervalTree:
-    extract_begin_lines = it.IntervalTree()
-    add_function_bodies(code_info.tree.root_node, extract_begin_lines)
-    extract_begin_lines.merge_overlaps()
-    definition_lines = it.IntervalTree()
-    add_function_definitions(code_info.tree.root_node, definition_lines)
-    extract_begin_lines.difference_update(definition_lines)
-    return extract_begin_lines
-
-
-code_info_valid_begin_lines = enumerate_extract_begin_lines()
-
-# for iv in sorted(code_info_valid_begin_lines):
-#     print(f"{iv.begin}:{iv.end}")
-#     print(code_info.numbered_lines(iv.begin, iv.end))
-
-
-def numbered_lines(start_line: int, limit_line: int, numbered_lines: it.IntervalTree) -> str:
-    return '\n'.join([(f'{i:04d}:{line}' if numbered_lines.overlaps(i) else f'----:{line}') for i, line in enumerate(code_info.lines[start_line:limit_line], start_line)])
-
-# print(numbered_lines(0, len(code_info.lines), code_info_valid_begin_lines))
 
 
 def extract_method_problems(code_info: CodeTreeInfo, fname: str, begin_line: int, end_line: int):
@@ -247,9 +205,9 @@ def extract_method_problems(code_info: CodeTreeInfo, fname: str, begin_line: int
         code_info.rm.io.tool_output(f"{fname} not in {code_info.fname}")
     for node in code_info.interval_tree_map.overlap(begin_line, limit_line):
         if node.data.node.type == 'function_definition':
-            if not code_info_valid_begin_lines.overlaps(begin_line):
+            if not code_info.valid_begin_lines.overlaps(begin_line):
                 return "Extraction must begin at a valid (i.e. numbered) line."
-            if not code_info_valid_begin_lines.overlaps(end_line):
+            if not code_info.valid_begin_lines.overlaps(end_line):
                 return "Extraction must end at a valid (i.e. numbered) line."
             if node.data.node.start_point[0] > end_line:
                 # This isn't overlapping.  Shouldn't happen or what?
@@ -273,17 +231,8 @@ def extract_method_problems(code_info: CodeTreeInfo, fname: str, begin_line: int
     return f"Extraction range ({begin_line}..{end_line}) is not within any function definition."
 
 
-code_info_project = rope.base.project.Project(code_info.rm.root)
-# dump(code_info_project)
-
-code_info_changes_list = []
-code_info_resource = code_info_project.get_resource(code_info.fname)
-# dump(code_info_resource)
-
-rope_lines = SourceLinesAdapter(code_info_resource.read())
-
-
 def line_range_to_rope_offset(start, end):
+    global rope_lines
     return rope_lines.get_line_start(start + 1), rope_lines.get_line_end(end + 1)
 
 
@@ -295,14 +244,14 @@ def extract_method_fn(
         new_function_name: str = Field(description="Name for the extracted method"),
         replace_similar: bool = Field(default=True, description="Replace similar code with a call to the extracted method"),
         global_def: bool = Field(default=False, description="Extract as a global function"),):
-    global code_info
+    global code_info, code_info_project, code_info_resource, code_info_changes_list
     code_info.rm.io.tool_output(f"Extract method {new_function_name} from {file_path} lines {begin_line}..{end_line}")
     problems = extract_method_problems(code_info, file_path, begin_line, end_line)
     if problems:
         code_info.rm.io.tool_output(f"Error: {problems}")
         return f"ERROR: {problems}.  Your extraction selection should be a portion of the function body with a narrower purpose than the existing function as a whole."
-    begin_offset, end_offset = line_range_to_rope_offset(begin_line, end_line)
     try:
+        begin_offset, end_offset = line_range_to_rope_offset(begin_line, end_line)
         extractor = ExtractMethod(code_info_project, code_info_resource, begin_offset, end_offset)
         changes = extractor.get_changes(new_function_name, similar=replace_similar, global_=global_def)
         dump(changes.get_description())
@@ -398,27 +347,28 @@ If you don't see any actions that improve the code, you can also respond `nothin
 Please do at most 5."""
 
 
-llm = OpenAI(model='gpt-4-1106-preview')
-# Default max_function_calls is 5.
-agent = OpenAIAgent.from_tools(
-    llm=llm, tools=[extract_method_tool], verbose=True
-)
+def run_agent(swe_instructions, streaming: bool = True):
+    global extract_method_tool
+    llm = OpenAI(model='gpt-4-1106-preview')
+    # Default max_function_calls is 5.
+    agent = OpenAIAgent.from_tools(llm=llm, tools=[extract_method_tool], verbose=True)
 
-prompt = swe_instructions + '\n\n' + code_info.fname + '\n' + numbered_lines(0, len(code_info.lines), code_info_valid_begin_lines)
-print(prompt)
+    prompt = swe_instructions + '\n\n' + code_info.fname + '\n' + code_info.numbered_lines(code_info.valid_begin_lines)
+    print(prompt)
 
-code_info_changes_list = []
+    code_info_changes_list = []
 
-if streaming:
-    response = agent.stream_chat(prompt)
-    response_gen = response.response_gen
+    if streaming:
+        response = agent.stream_chat(prompt)
+        response_gen = response.response_gen
 
-    for token in response_gen:
-        print(token, end="")
-else:
-    response = agent.chat(prompt)
+        for token in response_gen:
+            print(token, end="")
+    else:
+        response = agent.chat(prompt)
 
-print(wraplines(str(response), width=120))
+    print(wraplines(str(response), width=120))
+    return code_info_changes_list
 
 
 def merge_change_list(resource, change_list: list[Change]) -> Change:
@@ -428,7 +378,7 @@ def merge_change_list(resource, change_list: list[Change]) -> Change:
         if isinstance(change, ChangeSet):
             source = merge_changes(resource, change.changes, source, base)
         elif isinstance(change, ChangeContents):
-            source = merge(source, change.new_contents, base)
+            source = merge(change.new_contents, source, base)
     return ChangeContents(resource, source)
 
 
@@ -437,24 +387,67 @@ def merge_changes(resource, change_list: list[Change], source: str, base: str) -
         if isinstance(change, ChangeSet):
             source = merge_changes(resource, change.changes, source, base)
         elif isinstance(change, ChangeContents):
-            source = merge(source, change.new_contents, base)
+            source = merge(change.new_contents, source, base)
     return source
 
 
-if code_info_changes_list:
-    if len(code_info_changes_list) == 1:
-        the_change = code_info_changes_list[0]
+def main(cli_args):
+    global code_info, code_info_project, code_info_resource, code_info_changes_list, rope_lines
+
+    if 'OPENAI_API_KEY' not in os.environ:
+        print("Please set OPENAI_API_KEY environment variable")
+        exit(1)
+
+    # Create the parser
+    parser = argparse.ArgumentParser(description="Process some files.")
+
+    # Add the arguments
+    parser.add_argument('file', type=str, help='The file to refactor')
+    parser.add_argument('--repo_dir', type=str, default=os.getcwd(), help='The directory to process (defaults to current directory)')
+    parser.add_argument('--no_streaming', action='store_true', help='Disable streaming')
+    parser.add_argument('--no_commit', action='store_true', help='Disable commit (i.e. update file)')
+    parser.add_argument('--no_undo', action='store_true', help='Disable undo commit')
+
+    args = parser.parse_args(args=cli_args)
+
+    fname = args.file
+    repo_dir = args.repo_dir
+
+    # Check if the file exists
+    if not os.path.isfile(fname):
+        print(f"The file {fname} does not exist.")
+        exit(1)
+
+    # Check if the directory exists
+    if not os.path.isdir(repo_dir):
+        print(f"The directory {repo_dir} does not exist.")
+        exit(1)
+
+    rm = RepoMap(root=repo_dir, io=InputOutput(), main_model=models.Model.create('gpt-4-1106-preview'))
+    code_info = CodeTreeInfo(rm=rm, fname=fname)
+    code_info_project = rope.base.project.Project(code_info.rm.root)
+    code_info_resource = code_info_project.get_resource(code_info.fname)
+    rope_lines = SourceLinesAdapter(code_info_resource.read())
+    code_info_changes_list = []
+    run_agent(swe_instructions, streaming=not args.no_streaming)
+
+    if code_info_changes_list:
+        if len(code_info_changes_list) == 1:
+            the_change = code_info_changes_list[0]
+        else:
+            the_change = merge_change_list(code_info_resource, code_info_changes_list)
+
+        print(the_change.get_description())
+
+        if not args.no_commit:
+            print("File updated.")
+            code_info_project.do(the_change)
+            if not args.no_undo:
+                input("Press Enter to undo commit.")
+                code_info_project.history.undo()
     else:
-        the_change = merge_change_list(code_info_resource, code_info_changes_list)
+        print("No changes to commit")
 
-    print(the_change.get_description())
 
-    if do_commit:
-        print("File updated.")
-        code_info_project.do(the_change)
-        if undo_commit:
-            input("Press Enter to undo commit.")
-            code_info_project.history.undo()
-else:
-    print("No changes to commit")
-
+if __name__ == '__main__':
+    main(sys.argv[1:])
