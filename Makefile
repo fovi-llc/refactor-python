@@ -12,7 +12,6 @@ venv: $(VENV)/bin/activate
 
 install: venv
 	git clone https://github.com/paul-gauthier/aider.git
-	cd aider && git checkout openai-upgrade
 	./$(VENV)/bin/python3 -m pip install ./aider
 	./$(VENV)/bin/python3 -m pip install -r requirements.txt
 

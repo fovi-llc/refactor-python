@@ -6,7 +6,7 @@ PoC for LLM-powered code refactoring
 # Installation & Test
 
 This will create and use a Python VENV in .env.
-Also gets aider-chat from GitHub and builds the branch that has the OpenAI API v1 upgrade.
+Also gets aider-chat from GitHub and builds the latest which has the OpenAI API v1 upgrade.
 
 ```
 make install
