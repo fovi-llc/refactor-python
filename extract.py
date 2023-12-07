@@ -78,15 +78,16 @@ def enumerate_extract_begin_lines(node: ts.Node) -> it.IntervalTree:
     add_function_definitions(node, definition_lines)
     extract_begin_lines.difference_update(definition_lines)
     return extract_begin_lines
-    
 
 
 Ref = namedtuple("Ref", ['tag', 'name', 'line', 'node'])
+
 
 @dataclass()
 class CodeIntervalInfo:
     node: ts.Node
     token_count: int
+
 
 @dataclass()
 class CodeTreeInfo:
@@ -144,7 +145,7 @@ class CodeTreeInfo:
             self.interval_tree_map.add(it.Interval(start_line, limit_line, info))
         for child in node.children:
             self.add_definitions_to_map(child)
-    
+
     def list_references(self):
         # Load the tags queries
         # scm_fname = pkg_resources.resource_filename(
@@ -170,16 +171,14 @@ class CodeTreeInfo:
                 continue
 
             yield Ref(tag=tag, name=node.text.decode("utf-8"), line=node.start_point[0], node=node)
-    
-    def numbered_lines(self, start_line: int = 0, limit_line: int = None):
-        if limit_line is None:
-            limit_line = len(self.lines)
-        return '\n'.join([f'{i:04d}{self.number_separator}{line}' for i, line in enumerate(self.lines[start_line:limit_line], start_line)])
 
-    def numbered_lines(self, numbered_lines: it.IntervalTree, start_line: int = 0, limit_line: int = None) -> str:
+    def numbered_lines(self, included_lines: it.IntervalTree = None, start_line: int = 0, limit_line: int = None) -> str:
         if limit_line is None:
             limit_line = len(self.lines)
-        return '\n'.join([(f'{i:04d}:{line}' if numbered_lines.overlaps(i) else f'----:{line}') for i, line in enumerate(self.lines[start_line:limit_line], start_line)])
+        if included_lines is None:
+            included_lines = it.IntervalTree()
+            included_lines.addi(start_line, limit_line)
+        return '\n'.join([(f'{i:04d}:{line}' if included_lines.overlaps(i) else f'----:{line}') for i, line in enumerate(self.lines[start_line:limit_line], start_line)])
 
 
 def code_info_init(root: str, fname: str):
