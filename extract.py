@@ -1,52 +1,42 @@
 #!python
 # %pip install -qU aider-chat intervaltree rope llama-index diff-match-patch httpx httpcore
 
+import argparse
 import os
-from pathlib import Path
 import sys
-
-from aider.dump import dump
-from aider.io import InputOutput
-from aider import models
-from aider.repomap import RepoMap
+from collections import namedtuple
+from dataclasses import dataclass
+from pathlib import Path
+from textwrap import wrap
 
 import intervaltree as it
 import tree_sitter as ts
-
+from aider import models
+from aider.dump import dump
+from aider.io import InputOutput
+from aider.repomap import RepoMap
+from diff_match_patch import diff_match_patch
 from grep_ast import filename_to_lang
-from tree_sitter_languages import get_language, get_parser
-
-from collections import namedtuple
-from dataclasses import dataclass
-
-from llama_index.tools import FunctionTool
-from llama_index.agent import OpenAIAssistantAgent
-
 from llama_index.agent import OpenAIAgent
-from llama_index.llms import OpenAI
 from llama_index.bridge.pydantic import Field
+from llama_index.llms import OpenAI
+from llama_index.tools import FunctionTool
 from llama_index.tools.utils import create_schema_from_function
-
-from textwrap import wrap
-
-from rope.base.project import Project
-from rope.refactor.extract import ExtractVariable, ExtractMethod
+from rope.base.change import Change, ChangeContents, ChangeSet
 from rope.base.codeanalyze import SourceLinesAdapter
 from rope.base.exceptions import RopeError
-from rope.base.change import Change, ChangeSet, ChangeContents
-
-from diff_match_patch import diff_match_patch
-
-import argparse
+from rope.base.project import Project
+from rope.refactor.extract import ExtractMethod
+from tree_sitter_languages import get_language, get_parser
 
 
 def add_function_bodies(node: ts.Node, body_lines: it.IntervalTree):
     if node is None:
         return
-    if 'function_definition' in node.type:
-        for body in node.children_by_field_name('body'):
+    if "function_definition" in node.type:
+        for body in node.children_by_field_name("body"):
             start_line = body.start_point[0]
-            limit_line = body.end_point[0]+1
+            limit_line = body.end_point[0] + 1
             body_lines.addi(start_line, limit_line)
     for child in node.children:
         add_function_bodies(child, body_lines)
@@ -56,14 +46,14 @@ def add_function_bodies(node: ts.Node, body_lines: it.IntervalTree):
 def add_function_definitions(node: ts.Node, definition_lines: it.IntervalTree):
     if node is None:
         return
-    if 'function_definition' in node.type:
+    if "function_definition" in node.type:
         for child in node.children:
-            if child.type == 'body':
+            if child.type == "body":
                 break
             start_line = child.start_point[0]
-            limit_line = child.end_point[0]+1
+            limit_line = child.end_point[0] + 1
             definition_lines.addi(start_line, limit_line)
-            if child.type == ':':
+            if child.type == ":":
                 break
     for child in node.children:
         add_function_definitions(child, definition_lines)
@@ -80,7 +70,7 @@ def enumerate_extract_begin_lines(node: ts.Node) -> it.IntervalTree:
     return extract_begin_lines
 
 
-Ref = namedtuple("Ref", ['tag', 'name', 'line', 'node'])
+Ref = namedtuple("Ref", ["tag", "name", "line", "node"])
 
 
 @dataclass()
@@ -138,9 +128,9 @@ class CodeTreeInfo:
     def add_definitions_to_map(self, node: ts.Node):
         if node is None:
             return
-        if 'definition' in node.type:
+        if "definition" in node.type:
             start_line = node.start_point[0]
-            limit_line = node.end_point[0]+1
+            limit_line = node.end_point[0] + 1
             info = CodeIntervalInfo(node, sum(self.token_counts[start_line:limit_line]))
             self.interval_tree_map.add(it.Interval(start_line, limit_line, info))
         for child in node.children:
@@ -148,9 +138,6 @@ class CodeTreeInfo:
 
     def list_references(self):
         # Load the tags queries
-        # scm_fname = pkg_resources.resource_filename(
-        #     __name__, os.path.join("queries", f"tree-sitter-{lang}-tags.scm")
-        # )
         scm_fname = os.path.join("aider/queries", f"tree-sitter-{self.lang}-tags.scm")
         query_scm = Path(scm_fname)
         if not query_scm.exists():
@@ -167,23 +154,28 @@ class CodeTreeInfo:
         captures = list(captures)
 
         for node, tag in captures:
-            if 'name.reference' not in tag:
+            if "name.reference" not in tag:
                 continue
 
             yield Ref(tag=tag, name=node.text.decode("utf-8"), line=node.start_point[0], node=node)
 
-    def numbered_lines(self, included_lines: it.IntervalTree = None, start_line: int = 0, limit_line: int = None) -> str:
+    def numbered_lines(
+        self, included_lines: it.IntervalTree = None, start_line: int = 0, limit_line: int = None
+    ) -> str:
         if limit_line is None:
             limit_line = len(self.lines)
         if included_lines is None:
             included_lines = it.IntervalTree()
             included_lines.addi(start_line, limit_line)
-        return '\n'.join([(f'{i:04d}:{line}' if included_lines.overlaps(i) else f'----:{line}') for i, line in enumerate(self.lines[start_line:limit_line], start_line)])
+        return "\n".join([
+            (f"{i:04d}:{line}" if included_lines.overlaps(i) else f"----:{line}")
+            for i, line in enumerate(self.lines[start_line:limit_line], start_line)
+        ])
 
 
 def code_info_init(root: str, fname: str):
     global rm, code_info, code_info_changes_list
-    rm = RepoMap(root=root, io=InputOutput(), main_model=models.Model.create('gpt-4-1106-preview'))
+    rm = RepoMap(root=root, io=InputOutput(), main_model=models.Model.create("gpt-4-1106-preview"))
     code_info = CodeTreeInfo(rm=rm, fname=fname)
     code_info_changes_list = []
     return code_info
@@ -207,14 +199,14 @@ def get_code_info_changes_list() -> list[Change]:
 def print_identifiers(node):
     if node is None:
         return
-    if 'identifier' in node.type:
+    if "identifier" in node.type:
         print(f"identifier: {node.text.decode(code_info.encoding)}")
     for child in node.children:
         print_identifiers(child)
 
 
 def wraplines(lines: str, width: int = 80):
-    return '\n'.join(['\n'.join(wrap(line, width)) for line in lines.splitlines()])
+    return "\n".join(["\n".join(wrap(line, width)) for line in lines.splitlines()])
 
 
 def print_node(node: ts.Node, indent: int = 0):
@@ -225,34 +217,31 @@ def print_node(node: ts.Node, indent: int = 0):
 
 def extract_method_problems(code_info: CodeTreeInfo, fname: str, begin_line: int, end_line: int):
     limit_line = end_line + 1
-    # print(code_info.numbered_lines(begin_line, limit_line))
     if fname not in code_info.fname:
         code_info.rm.io.tool_output(f"{fname} not in {code_info.fname}")
     for node in code_info.interval_tree_map.overlap(begin_line, limit_line):
-        if node.data.node.type == 'function_definition':
-            if not code_info.valid_begin_lines.overlaps(begin_line):
-                return "Extraction must begin at a valid (i.e. numbered) line."
-            if not code_info.valid_begin_lines.overlaps(end_line):
-                return "Extraction must end at a valid (i.e. numbered) line."
-            if node.data.node.start_point[0] > end_line:
-                # This isn't overlapping.  Shouldn't happen or what?
-                continue                
-            if (node.data.node.end_point[0] < begin_line):
-                # This isn't overlapping.  Shouldn't happen or what?
-                continue
-            if node.data.node.start_point[0] < begin_line:
-                if node.data.node.end_point[0] < end_line:
-                    return f"Extraction range invalid.  Begins ({begin_line}) inside body but end ({end_line}) is beyond the function's end ({node.data.node.start_point[0]}..{node.data.node.end_point[0]})."
-                
-            extraction_line_count = (end_line - begin_line) + 1
-            body_line_count = (node.data.node.end_point[0] - node.data.node.start_point[0]) + 1
-            if extraction_line_count == body_line_count:
-                return "Extracting whole body."
-            if extraction_line_count / body_line_count > 0.75:
-                return "Extracting more than 75% of function body."
-            if extraction_line_count > body_line_count - 2:
-                return "Extracting too much of function body."
-            return None
+        if node.data.node.type != "function_definition":
+            continue
+        if not code_info.valid_begin_lines.overlaps(begin_line):
+            return "Extraction must begin at a valid (i.e. numbered) line."
+        if not code_info.valid_begin_lines.overlaps(end_line):
+            return "Extraction must end at a valid (i.e. numbered) line."
+        if node.data.node.start_point[0] > end_line:
+            continue
+        if node.data.node.end_point[0] < begin_line:
+            continue
+        if node.data.node.start_point[0] < begin_line:
+            if node.data.node.end_point[0] < end_line:
+                return f"Extraction range invalid.  Begins ({begin_line}) inside body but end ({end_line}) is beyond the function's end ({node.data.node.start_point[0]}..{node.data.node.end_point[0]})."
+        extraction_line_count = end_line - begin_line + 1
+        body_line_count = node.data.node.end_point[0] - node.data.node.start_point[0] + 1
+        if extraction_line_count == body_line_count:
+            return "Extracting whole body."
+        if extraction_line_count / body_line_count > 0.75:
+            return "Extracting more than 75% of function body."
+        if extraction_line_count > body_line_count - 2:
+            return "Extracting too much of function body."
+        return None
     return f"Extraction range ({begin_line}..{end_line}) is not within any function definition."
 
 
@@ -263,15 +252,20 @@ def line_range_to_rope_offset(start, end):
 
 # @trace_method
 def extract_method_fn(
-        file_path: str = Field(description="Path to the file to extract the method from"),
-        begin_line: int = Field(description="Number of first line to extract"),
-        end_line: int = Field(description="Number of last line to extract"),
-        new_function_name: str = Field(description="Name for the extracted method"),
-        replace_similar: bool = Field(default=True, description="Replace similar code with a call to the extracted method"),
-        global_def: bool = Field(default=False, description="Extract as a global function"),):
+    file_path: str = Field(description="Path to the file to extract the method from"),
+    begin_line: int = Field(description="Number of first line to extract"),
+    end_line: int = Field(description="Number of last line to extract"),
+    new_function_name: str = Field(description="Name for the extracted method"),
+    replace_similar: bool = Field(
+        default=True, description="Replace similar code with a call to the extracted method"
+    ),
+    global_def: bool = Field(default=False, description="Extract as a global function"),
+):
     print(f"Extract method {new_function_name} from {file_path} lines {begin_line}..{end_line}")
     global code_info, code_info_project, code_info_resource, code_info_changes_list
-    code_info.rm.io.tool_output(f"Extract method {new_function_name} from {file_path} lines {begin_line}..{end_line}")
+    code_info.rm.io.tool_output(
+        f"Extract method {new_function_name} from {file_path} lines {begin_line}..{end_line}"
+    )
     problems = extract_method_problems(code_info, file_path, begin_line, end_line)
     if problems:
         code_info.rm.io.tool_output(f"Error: {problems}")
@@ -279,7 +273,9 @@ def extract_method_fn(
     try:
         begin_offset, end_offset = line_range_to_rope_offset(begin_line, end_line)
         extractor = ExtractMethod(code_info_project, code_info_resource, begin_offset, end_offset)
-        changes = extractor.get_changes(new_function_name, similar=replace_similar, global_=global_def)
+        changes = extractor.get_changes(
+            new_function_name, similar=replace_similar, global_=global_def
+        )
         dump(changes.get_description())
         code_info_changes_list.append(changes)
         print(f"Extracted method {new_function_name}.")
@@ -289,7 +285,6 @@ def extract_method_fn(
         return f"ERROR: {e}. Note that a valid extraction must begin within a method body and end on the same syntactic level (i.e. same indentation level for Python) as the beginning."
     raise Exception("Shouldn't get here")
 
-
 # extract_tool_description = """Use this function to refactor by extracting a new method from a range of lines of code that are part of an existing method.
 # The lines of code to be extracted must be a syntactically contiguous block.
 # IOW the lines must be a single statement or a single block of statements (IOW cannot be at different indentation levels).
@@ -297,32 +292,33 @@ def extract_method_fn(
 # Note that an extraction can never begin at the line that defines the existing function's name.
 # The size of the extraction is also limited to less than 75% of the existing function's body."""
 
-extract_tool_description = """Use this function to refactor the code by extracting a new method from a range of lines of code."""
 
-extract_method_tool = FunctionTool.from_defaults(
+EXTRACT_TOOL_DESCRIPTION = """Use this function to refactor the code by extracting a new method from a range of lines of code."""
+
+EXTRACT_METHOD_TOOL = FunctionTool.from_defaults(
     fn=extract_method_fn,
     name="extract_method",
-    description=extract_tool_description,
+    description=EXTRACT_TOOL_DESCRIPTION,
     fn_schema=create_schema_from_function("extract_method_schema", extract_method_fn),
 )
 
 
 def insert_comment_fn(
-        file_path: str = Field(description="Path to the file to extract the method from"),
-        line: int = Field(description="Line number to insert the comment at"),
-        comment: str = Field(description="The comment to insert")):
+    file_path: str = Field(description="Path to the file to extract the method from"),
+    line: int = Field(description="Line number to insert the comment at"),
+    comment: str = Field(description="The comment to insert"),
+):
     global code_info
     code_info.rm.io.tool_output(f"Comment at {file_path} line {line}: {comment}")
     return f"Inserted comment at {line}."
 
 
-insert_comment_tool = FunctionTool.from_defaults(
+INSERT_COMMENT_TOOL = FunctionTool.from_defaults(
     fn=insert_comment_fn,
     name="insert_comment",
     description="""Use this function to insert explanatory comments into the code.""",
     fn_schema=create_schema_from_function("insert_comment_schema", insert_comment_fn),
 )
-
 
 # swe_instructions = """You are an expert software engineer.
 # Examine the code and refactor when you find worthwhile opportunities.
@@ -357,7 +353,7 @@ insert_comment_tool = FunctionTool.from_defaults(
 #     run_retrieve_sleep_time=1.0,
 # )
 
-swe_instructions = """
+SWE_INSTRUCTIONS = """
 You are a refactoring expert, specializing in extracting code paragraphs from long methods.
 
 In the provided Python code, extract method opportunities using the refactoring tool.
@@ -376,11 +372,17 @@ Please do at most 5."""
 
 def run_agent(swe_instructions, streaming: bool = True):
     global extract_method_tool
-    llm = OpenAI(model='gpt-4-1106-preview')
+    llm = OpenAI(model="gpt-4-1106-preview")
     # Default max_function_calls is 5.
-    agent = OpenAIAgent.from_tools(llm=llm, tools=[extract_method_tool], verbose=True)
+    agent = OpenAIAgent.from_tools(llm=llm, tools=[EXTRACT_METHOD_TOOL], verbose=True)
 
-    prompt = swe_instructions + '\n\n' + code_info.fname + '\n' + code_info.numbered_lines(code_info.valid_begin_lines)
+    prompt = (
+        swe_instructions
+        + "\n\n"
+        + code_info.fname
+        + "\n"
+        + code_info.numbered_lines(code_info.valid_begin_lines)
+    )
     print(prompt)
 
     code_info_changes_list = []
@@ -416,10 +418,6 @@ def merge(v0: str, a: str, b: str) -> str:
     # to Diff Match Patch
     # Yes, this is what DMP was originally built for. Here's the
     # pseudocode:
-    #
-    # patches = patch_make(V0, V2)
-    # (V3, result) = patch_apply(patches, V1)
-    #
     # The result list is an array of true/false values. If it's all true,
     # then the merge worked great. If there's a false, then one of the
     # patches could not be applied. In that case it might be worth swapping
@@ -460,7 +458,7 @@ def merge_changes(resource, base: str, source: str, change_list: list[Change]) -
 def main(cli_args):
     global code_info, code_info_project, code_info_resource, code_info_changes_list, rope_lines
 
-    if 'OPENAI_API_KEY' not in os.environ:
+    if "OPENAI_API_KEY" not in os.environ:
         print("Please set OPENAI_API_KEY environment variable")
         exit(1)
 
@@ -468,11 +466,18 @@ def main(cli_args):
     parser = argparse.ArgumentParser(description="Process some files.")
 
     # Add the arguments
-    parser.add_argument('file', type=str, help='The file to refactor')
-    parser.add_argument('--repo_dir', type=str, default=os.getcwd(), help='The directory to process (defaults to current directory)')
-    parser.add_argument('--no_streaming', action='store_true', help='Disable streaming')
-    parser.add_argument('--no_commit', action='store_true', help='Disable commit (i.e. update file)')
-    parser.add_argument('--no_undo', action='store_true', help='Disable undo commit')
+    parser.add_argument("file", type=str, help="The file to refactor")
+    parser.add_argument(
+        "--repo_dir",
+        type=str,
+        default=os.getcwd(),
+        help="The directory to process (defaults to current directory)",
+    )
+    parser.add_argument("--no_streaming", action="store_true", help="Disable streaming")
+    parser.add_argument(
+        "--no_commit", action="store_true", help="Disable commit (i.e. update file)"
+    )
+    parser.add_argument("--no_undo", action="store_true", help="Disable undo commit")
 
     args = parser.parse_args(args=cli_args)
 
@@ -490,8 +495,8 @@ def main(cli_args):
         exit(1)
 
     code_info_init(root=repo_dir, fname=fname)
-    
-    run_agent(swe_instructions, streaming=not args.no_streaming)
+
+    run_agent(SWE_INSTRUCTIONS, streaming=not args.no_streaming)
 
     if code_info_changes_list:
         if len(code_info_changes_list) == 1:
@@ -511,5 +516,5 @@ def main(cli_args):
         print("No changes to commit")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main(sys.argv[1:])
