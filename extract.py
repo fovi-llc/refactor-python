@@ -293,12 +293,12 @@ def extract_method_fn(
 # The size of the extraction is also limited to less than 75% of the existing function's body."""
 
 
-EXTRACT_TOOL_DESCRIPTION = """Use this function to refactor the code by extracting a new method from a range of lines of code."""
+extract_tool_description = """Use this function to refactor the code by extracting a new method from a range of lines of code."""
 
-EXTRACT_METHOD_TOOL = FunctionTool.from_defaults(
+extract_method_tool = FunctionTool.from_defaults(
     fn=extract_method_fn,
     name="extract_method",
-    description=EXTRACT_TOOL_DESCRIPTION,
+    description=extract_tool_description,
     fn_schema=create_schema_from_function("extract_method_schema", extract_method_fn),
 )
 
@@ -353,7 +353,7 @@ INSERT_COMMENT_TOOL = FunctionTool.from_defaults(
 #     run_retrieve_sleep_time=1.0,
 # )
 
-SWE_INSTRUCTIONS = """
+swe_instructions = """
 You are a refactoring expert, specializing in extracting code paragraphs from long methods.
 
 In the provided Python code, extract method opportunities using the refactoring tool.
@@ -374,7 +374,7 @@ def run_agent(swe_instructions, streaming: bool = True):
     global extract_method_tool
     llm = OpenAI(model="gpt-4-1106-preview")
     # Default max_function_calls is 5.
-    agent = OpenAIAgent.from_tools(llm=llm, tools=[EXTRACT_METHOD_TOOL], verbose=True)
+    agent = OpenAIAgent.from_tools(llm=llm, tools=[extract_method_tool], verbose=True)
 
     prompt = (
         swe_instructions
@@ -496,7 +496,7 @@ def main(cli_args):
 
     code_info_init(root=repo_dir, fname=fname)
 
-    run_agent(SWE_INSTRUCTIONS, streaming=not args.no_streaming)
+    run_agent(swe_instructions, streaming=not args.no_streaming)
 
     if code_info_changes_list:
         if len(code_info_changes_list) == 1:
