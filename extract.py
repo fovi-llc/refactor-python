@@ -269,6 +269,7 @@ def extract_method_fn(
         new_function_name: str = Field(description="Name for the extracted method"),
         replace_similar: bool = Field(default=True, description="Replace similar code with a call to the extracted method"),
         global_def: bool = Field(default=False, description="Extract as a global function"),):
+    print(f"Extract method {new_function_name} from {file_path} lines {begin_line}..{end_line}")
     global code_info, code_info_project, code_info_resource, code_info_changes_list
     code_info.rm.io.tool_output(f"Extract method {new_function_name} from {file_path} lines {begin_line}..{end_line}")
     problems = extract_method_problems(code_info, file_path, begin_line, end_line)
@@ -281,6 +282,7 @@ def extract_method_fn(
         changes = extractor.get_changes(new_function_name, similar=replace_similar, global_=global_def)
         dump(changes.get_description())
         code_info_changes_list.append(changes)
+        print(f"Extracted method {new_function_name}.")
         return f"Extracted method {new_function_name}."
     except RopeError as e:
         code_info.rm.io.tool_output(f"Error: {e}")
@@ -358,7 +360,7 @@ insert_comment_tool = FunctionTool.from_defaults(
 swe_instructions = """
 You are a refactoring expert, specializing in extracting code paragraphs from long methods.
 
-In the provided Python code, identify extract method opportunities for the refactoring tool.
+In the provided Python code, extract method opportunities using the refactoring tool.
 
 # Criteria
 
